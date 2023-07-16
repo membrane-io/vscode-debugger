@@ -1,54 +1,40 @@
 import { BasicSourceMapConsumer, MappedPosition, SourceMapConsumer } from 'source-map';
-import { LoggingDebugSession } from 'vscode-debugadapter';
+import { LoggingDebugSession } from '@vscode/debugadapter';
 import { SourcemapArguments } from "./sourcemapArguments";
+import { getProgramPath } from './util';
 const path = require('path');
-const fs = require('fs');
 
 export abstract class SourcemapSession extends LoggingDebugSession {
 	// a map of all absolute file sources found in the sourcemaps
 	private _fileToSourceMap = new Map<string, BasicSourceMapConsumer>();
-	private _sourceMapsLoading: Promise<any>|undefined;
 	// keep track of the sourcemaps and the location of the file.map used to load it
 	private _sourceMaps = new Map<BasicSourceMapConsumer, string>();
 
-	abstract async logTrace(message: string);
-	abstract async getArguments(): Promise<SourcemapArguments>;
+	abstract log(message: string);
+	abstract getArguments(): Promise<SourcemapArguments>;
+	abstract getProgramName(): string;
 
-	async loadSourceMaps() {
-		const commonArgs = await this.getArguments();
-		if (this._sourceMapsLoading)
-			return await this._sourceMapsLoading;
-
-		let sourceMaps = Object.keys(commonArgs.sourceMaps || {}) || [];
-
-		let promises = sourceMaps.map(sourcemap => (async () => {
-			try {
-				let json = JSON.parse(fs.readFileSync(sourcemap).toString());
-				let smc = await new SourceMapConsumer(json);
-				this._sourceMaps.set(smc, sourcemap);
-				let sourceMapRoot = path.dirname(sourcemap);
-				let sources = smc.sources.map(source => path.join(sourceMapRoot, source) as string);
-				for (let source of sources) {
-					const other = this._fileToSourceMap.get(source);
-					if (other) {
-						this.logTrace(`sourcemap for ${source} found in ${other.file}.map and ${sourcemap}`);
-					}
-					else {
-						this._fileToSourceMap.set(source, smc);
-					}
-				}
+	async loadSourceMap(sourcemap: string) {
+		let json = JSON.parse(sourcemap);
+		json.file = "index.js";
+		let smc = await new SourceMapConsumer(json);
+		this._sourceMaps.set(smc, "index.js");
+		let sources = smc.sources.map(source => {
+			 return source
+		});
+		for (let source of sources) {
+			const other = this._fileToSourceMap.get(source);
+			if (other) {
+				this.log(`sourcemap for ${source} found in ${other.file}.map and ${sourcemap}`);
+			} else {
+				this.log('Source map loaded for ' + source);
+				this._fileToSourceMap.set(source, smc);
 			}
-			catch (e) {
-			}
-		})());
-
-		this._sourceMapsLoading = Promise.all(promises);
-
-		return await this._sourceMapsLoading;
+		}
 	}
 
 	async translateFileToRemote(file: string): Promise<string> {
-		await this.loadSourceMaps();
+		this.log('JUAN translateFileToRemote: ' + file);
 
 		const sm = this._fileToSourceMap.get(file);
 		if (!sm)
@@ -57,6 +43,8 @@ export abstract class SourcemapSession extends LoggingDebugSession {
 	}
 
 	private async getRemoteAbsolutePath(remoteFile: string, remoteRoot?: string): Promise<string> {
+		this.log('JUAN getRemoteAbsolutePath: ' + remoteFile);
+		return "index.js";
 		const commonArgs = await this.getArguments();
 		if (remoteRoot === null)
 			remoteRoot = commonArgs.remoteRoot;
@@ -66,6 +54,8 @@ export abstract class SourcemapSession extends LoggingDebugSession {
 	}
 
 	private async getRemoteRelativePath(remoteFile: string, remoteRoot?: string): Promise<string> {
+		this.log('JUAN getRemoteRelativePath ' + remoteFile);
+		return remoteFile;
 		const commonArgs = await this.getArguments();
 		if (remoteRoot === null)
 			remoteRoot = commonArgs.remoteRoot;
@@ -75,22 +65,35 @@ export abstract class SourcemapSession extends LoggingDebugSession {
 	}
 
 	private async getLocalAbsolutePath(localFile: string): Promise<string> {
+		this.log('JUAN getLocalAbsolutePath ' + localFile);
 		const commonArgs = await this.getArguments();
 		if (commonArgs.localRoot)
 			return path.join(commonArgs.localRoot, localFile);
 		return localFile;
 	}
+
+	private isProgramFile(absolutePath: string): boolean {
+		// TODO: does not support files in subdirectories
+		return path.basename(path.dirname(absolutePath)) === this.getProgramName();
+	}
+
 	private async getLocalRelativePath(localFile: string): Promise<string> {
-		const commonArgs = await this.getArguments();
-		if (commonArgs.localRoot)
-			return path.relative(commonArgs.localRoot, localFile);
+		if (this.isProgramFile(localFile)) {
+			return path.basename(localFile);
+		}
+		// const commonArgs = await this.getArguments();
+		// if (commonArgs.localRoot)
+		// 	return path.relative(commonArgs.localRoot, localFile);
+		this.log('JUAN getLocalRelativePath ' + localFile);
 		return localFile;
 	}
 
-
 	async translateFileLocationToRemote(sourceLocation: MappedPosition): Promise<MappedPosition[]> {
-		await this.loadSourceMaps();
+		this.log('JUAN translateFileLocationToRemote ' + JSON.stringify(sourceLocation));
 		const commonArgs = await this.getArguments();
+		if (!this.isProgramFile(sourceLocation.source)) {
+			return [];
+		}
 
 		// step 1: translate the absolute local source position to a relative source position.
 		// (has sourcemap) /local/path/to/test.ts:10 -> test.js:15
@@ -101,18 +104,22 @@ export abstract class SourcemapSession extends LoggingDebugSession {
 		// (no remote root)test.js:10 -> test.js:10
 
 		try {
-			const sm = this._fileToSourceMap.get(sourceLocation.source);
+			// Membrane source maps use a relative path to the source.
+			const sourcePath = await this.getLocalRelativePath(sourceLocation.source);
+
+			const sm = this._fileToSourceMap.get(sourcePath);
 			if (!sm)
 				throw new Error('no source map');
 			const sourcemap = this._sourceMaps.get(sm);
 			if (!sourcemap)
 				throw new Error();
 			const actualSourceLocation = Object.assign({}, sourceLocation);
-			this.logTrace(`translateFileLocationToRemote: ${JSON.stringify(sourceLocation)} to: ${JSON.stringify(actualSourceLocation)}`);
-			// convert the local absolute path into a sourcemap relative path.
-			actualSourceLocation.source = path.relative(path.dirname(sourcemap), sourceLocation.source);
-			delete actualSourceLocation.column;
-			// let unmappedPosition: NullablePosition = sm.generatedPositionFor(actualSourceLocation);
+			// this.log(`translateFileLocationToRemote: ${JSON.stringify(sourceLocation)} to: ${JSON.stringify(actualSourceLocation)}`);
+			// // convert the local absolute path into a sourcemap relative path.
+			// actualSourceLocation.source = path.relative(path.dirname(sourcemap), sourceLocation.source);
+			// delete (actualSourceLocation as any).column;
+			// // let unmappedPosition: NullablePosition = sm.generatedPositionFor(actualSourceLocation);
+			actualSourceLocation.source = sourcePath;
 			let unmappedPositions = sm.allGeneratedPositionsFor(actualSourceLocation);
 			if (!unmappedPositions || !unmappedPositions.length)
 				throw new Error('map failed');
@@ -141,7 +148,7 @@ export abstract class SourcemapSession extends LoggingDebugSession {
 	}
 
 	async translateRemoteLocationToLocal(sourceLocation: MappedPosition): Promise<MappedPosition> {
-		await this.loadSourceMaps();
+		this.log('JUAN translateRemoteLocationToLocal ' + JSON.stringify(sourceLocation));
 		const commonArgs = await this.getArguments();
 
 		try {
@@ -152,27 +159,37 @@ export abstract class SourcemapSession extends LoggingDebugSession {
 				let remoteRoot = commonArgs.sourceMaps && commonArgs.sourceMaps[smp!];
 				let relativeFile = await this.getRemoteRelativePath(sourceLocation.source, remoteRoot);
 
-				if (relativeFile !== sm.file)
+				// TODO: source map has no file property. Fix in mctl?
+				if (relativeFile !== smp) {
+					this.log('NO MATCH ' + relativeFile + ' ' + smp);
 					continue;
+				} else {
+					this.log('MATCH ' + relativeFile + ' ' + smp);
+				}
 
 				const original = sm.originalPositionFor({
 					column: sourceLocation.column,
 					line: sourceLocation.line,
 				});
-				this.logTrace(`translateRemoteLocationToLocal: ${JSON.stringify(sourceLocation)} to: ${JSON.stringify(original)}`);
+				this.log(`ORIGINAL POS FOR ${JSON.stringify(sourceLocation)}: ${JSON.stringify(original)}`);
+				const folderPath = getProgramPath(this.getProgramName());
+				this.log(`ORIGINAL SOURCE + ${smp}`);
+				original.source = path.join(folderPath, path.basename(original.source));
+				this.log(`translateRemoteLocationToLocal: ${JSON.stringify(sourceLocation)} to: ${JSON.stringify(original)}`);
 				if (original.line === null || original.column === null || original.source === null)
 					throw new Error("unable to map");
 
 				// now given a source mapped relative path, translate that into a local path.
 				return {
-					source: path.join(path.dirname(smp), original.source),
+					source: original.source,
 					line: original.line,
 					column: original.column,
 				};
 			}
-			throw new Error();
+			throw new Error(`No sourcemap found for ${sourceLocation.source}`);
 		}
 		catch (e) {
+			this.log(`FAILED TO TRANSLATE TO LOCAL: ${e}`);
 			// remote files need to be resolved to local files.
 			let ret = Object.assign({}, sourceLocation);
 			ret.source = await this.getLocalAbsolutePath(await this.getRemoteRelativePath(sourceLocation.source));

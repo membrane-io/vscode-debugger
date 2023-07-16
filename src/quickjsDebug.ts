@@ -1,30 +1,31 @@
-import * as CP from 'child_process';
-import { AddressInfo, createConnection, Server, Socket } from 'net';
+import * as vscode from 'vscode';
+import { Server, Socket, createConnection } from 'net';
 import { basename } from 'path';
 import { MappedPosition } from 'source-map';
-import { InitializedEvent, Logger, logger, OutputEvent, Scope, Source, StackFrame, StoppedEvent, TerminatedEvent, Thread, ThreadEvent } from 'vscode-debugadapter';
-import { DebugProtocol } from 'vscode-debugprotocol';
+import { InitializedEvent, Logger, logger, OutputEvent, Scope, Source, StackFrame, StoppedEvent, TerminatedEvent, Thread, ThreadEvent } from '@vscode/debugadapter';
+import { DebugProtocol } from '@vscode/debugprotocol';
 import { SourcemapArguments } from './sourcemapArguments';
 import { SourcemapSession } from "./sourcemapSession";
-const path = require('path');
+import * as WebSocketStream from '@httptoolkit/websocket-stream';
+import * as WebSocket from 'ws';
+import { configFile, getApiBaseUrl } from './util';
+const fetch = require('node-fetch');
+
 const Parser = require('stream-parser');
 const Transform = require('stream').Transform;
 const { Subject } = require('await-notify');
 
 interface CommonArguments extends SourcemapArguments {
-	program: string;
-	args?: string[];
-	cwd?: string;
-	runtimeExecutable: string;
-	mode: string;
-	address: string;
-	port: number;
-	console?: ConsoleType;
+	pname: string;
+	pid: string;
+	// args?: string[];
+	// cwd?: string;
+	// runtimeExecutable: string;
+	// mode: string;
+	// address: string;
+	// port: number;
+	// console?: ConsoleType;
 	trace?: boolean;
-}
-interface LaunchRequestArguments extends CommonArguments, DebugProtocol.LaunchRequestArguments {
-}
-interface AttachRequestArguments extends CommonArguments, DebugProtocol.AttachRequestArguments {
 }
 
 /**
@@ -52,23 +53,48 @@ class MessageParser extends Transform {
 }
 Parser(MessageParser.prototype);
 
-type ConsoleType = 'internalConsole' | 'integratedTerminal' | 'externalTerminal';
-
 interface PendingResponse {
 	resolve: Function;
 	reject: Function;
 }
 
-export class QuickJSDebugSession extends SourcemapSession {
-	private static RUNINTERMINAL_TIMEOUT = 5000;
+type ApiTunnel = WebSocketStream.WebSocketDuplex;
 
+// class ApiTunnel extends Duplex {
+// 	ws: WebSocket;
+// 	buf: String;
+// 	constructor(url: string) {
+// 		super();
+// 		this.ws = new WebSocket(url);
+// 		this.ws.onmessage = (event) => {
+// 			// Append to buf
+// 			this.buf += event.data;
+// 		};
+// 	}
+
+// 	_write(chunk, encoding, callback) {
+// 		console.log('WRITING TO API TUNNEL:', chunk.toString());
+// 		this.ws.send(chunk.toString());
+// 		// TODO: send chunk to API
+// 		callback();
+// 	}
+
+// 	_read(size) {
+// 		console.log('READING FROM API TUNNEL:', size);
+// 		// TODO: read from API
+// 		const data = "";
+// 		this.push("");
+// 	}
+
+// }
+
+export class QuickJSDebugSession extends SourcemapSession {
 	private _server?: Server;
-	private _supportsRunInTerminalRequest = false;
-	private _console: ConsoleType = 'internalConsole';
 	private _isTerminated: boolean;
 	private _threads = new Set<number>();
-	private _connection?: Socket;
+	private _connection?: ApiTunnel;
 	private _requests = new Map<number, PendingResponse>();
+	private _queuedEvents : { thread: number, event: any }[] = [];
 	// contains a list of real source files and their source mapped breakpoints.
 	// ie: file1.ts -> webpack.main.js:59
 	//     file2.ts -> webpack.main.js:555
@@ -87,18 +113,13 @@ export class QuickJSDebugSession extends SourcemapSession {
 	})();
 
 	public constructor() {
-		super("quickjs-debug.txt");
+		super("membrane-debug.txt");
 
 		this.setDebuggerLinesStartAt1(true);
 		this.setDebuggerColumnsStartAt1(true);
 	}
 
 	protected initializeRequest(response: DebugProtocol.InitializeResponse, args: DebugProtocol.InitializeRequestArguments): void {
-
-		if (typeof args.supportsRunInTerminalRequest === 'boolean') {
-			this._supportsRunInTerminalRequest = args.supportsRunInTerminalRequest;
-		}
-
 		// build and return the capabilities of this debug adapter:
 		response.body = response.body || {};
 
@@ -132,6 +153,12 @@ export class QuickJSDebugSession extends SourcemapSession {
 	}
 
 	private handleEvent(thread: number, event: any) {
+		logger.warn(`EVENT (${event.type})`);
+		if (this._requests.size !== 0) {
+			logger.warn("Queueing event");
+			this._queuedEvents.push({ thread, event });
+			return;
+		}
 		if (event.type === 'StoppedEvent') {
 			if (event.reason !== 'entry')
 				this.sendEvent(new StoppedEvent(event.reason, thread));
@@ -153,14 +180,22 @@ export class QuickJSDebugSession extends SourcemapSession {
 		let request_seq: number = json.request_seq;
 		let pending = this._requests.get(request_seq);
 		if (!pending) {
-			this.logTrace(`request not found: ${request_seq}`);
+			this.log(`request not found: ${request_seq}`);
 			return;
 		}
-		this._requests.delete(request_seq);
 		if (json.error)
 			pending.reject(new Error(json.error));
 		else
 			pending.resolve(json.body);
+		this._requests.delete(request_seq);
+
+		if (this._requests.size === 0) {
+			logger.warn(`No more pending requests. Sending events: ${this._queuedEvents.length}`);
+			for (let queued of this._queuedEvents) {
+				this.handleEvent(queued.thread, queued.event);
+			}
+			this._queuedEvents.length = 0;
+		}
 	}
 
 	private async newSession() {
@@ -182,7 +217,7 @@ export class QuickJSDebugSession extends SourcemapSession {
 		this.sendThreadMessage({ type: 'continue' });
 	}
 
-	private onSocket(socket: Socket) {
+	private onSocket(socket: ApiTunnel) {
 		this.closeConnection();
 		this._connection = socket;
 		this.newSession();
@@ -190,6 +225,7 @@ export class QuickJSDebugSession extends SourcemapSession {
 		let parser = new MessageParser();
 		parser.on('message', json => {
 			// the very first message will include the thread id, as it will be a stopped event.
+			this.log('MESSAGE: ' + JSON.stringify(json));
 			if (json.type === 'event') {
 				const thread = json.event.thread;
 				if (!this._threads.has(thread)) {
@@ -197,14 +233,14 @@ export class QuickJSDebugSession extends SourcemapSession {
 					this.sendEvent(new ThreadEvent("new", thread));
 					this.emit('quickjs-thread');
 				}
-				this.logTrace(`received message (thread ${thread}): ${JSON.stringify(json)}`);
-				this.handleEvent(thread, json.event);
+				this.log(`received message (thread ${thread}): ${JSON.stringify(json)}`);
+				Promise.resolve().then(() => this.handleEvent(thread, json.event));
 			}
 			else if (json.type === 'response') {
 				this.handleResponse(json);
 			}
 			else {
-				this.logTrace(`unknown message ${json.type}`);
+				this.log(`unknown message ${json.type}`);
 			}
 		});
 
@@ -219,177 +255,136 @@ export class QuickJSDebugSession extends SourcemapSession {
 		this.sendResponse(response);
 	}
 
-	protected async attachRequest(response: DebugProtocol.AttachResponse, args: AttachRequestArguments, request?: DebugProtocol.Request) {
-		this._commonArgs = args;
-		this._argsSubject.notify();
-		this.beforeConnection({});
-		this.afterConnection();
-		this.sendResponse(response);
-	}
-
-	protected async launchRequest(response: DebugProtocol.LaunchResponse, args: LaunchRequestArguments) {
-		this._commonArgs = args;
+	protected async attachRequest2(response: DebugProtocol.AttachResponse, args: DebugProtocol.AttachRequestArguments, request?: DebugProtocol.Request) {
+		let socket: Socket | undefined = undefined;
+		this._commonArgs = { ...args as any };
 		this._argsSubject.notify();
 
-		this._commonArgs.localRoot = args.localRoot;
-		this.closeServer();
-
-		let env = {};
-		try {
-			this.beforeConnection(env);
-		}
-		catch (e) {
-			this.sendErrorResponse(response, 17, e.message);
-			return;
-		}
-		let cwd = <string>args.cwd || path.dirname(args.program);
-
-		if (typeof args.console === 'string') {
-			switch (args.console) {
-				case 'internalConsole':
-				case 'integratedTerminal':
-				case 'externalTerminal':
-					this._console = args.console;
-					break;
-				default:
-					this.sendErrorResponse(response, 2028, `Unknown console type '${args.console}'.`);
-					return;
-			}
-		}
-
-		let qjsArgs = (args.args || []).slice();
-		qjsArgs.unshift(args.program);
-
-		if (this._supportsRunInTerminalRequest && (this._console === 'externalTerminal' || this._console === 'integratedTerminal')) {
-
-			const termArgs: DebugProtocol.RunInTerminalRequestArguments = {
-				kind: this._console === 'integratedTerminal' ? 'integrated' : 'external',
-				title: "QuickJS Debug Console",
-				cwd,
-				args: qjsArgs,
-				env,
-			};
-
-			this.runInTerminalRequest(termArgs, QuickJSDebugSession.RUNINTERMINAL_TIMEOUT, runResponse => {
-				if (runResponse.success) {
-					// this._attach(response, args, port, address, timeout);
-				} else {
-					this.sendErrorResponse(response, 2011, `Cannot launch debug target in terminal (${runResponse.message}).`);
-					// this._terminated('terminal error: ' + runResponse.message);
-				}
-			});
-		} else {
-			const options: CP.SpawnOptions = {
-				cwd,
-				env,
-			};
-
-			const nodeProcess = CP.spawn(args.runtimeExecutable, qjsArgs, options);
-			nodeProcess.on('error', (error) => {
-				// tslint:disable-next-line:no-bitwise
-				this.sendErrorResponse(response, 2017, `Cannot launch debug target (${error.message}).`);
-				this._terminated(`failed to launch target (${error})`);
-			});
-			nodeProcess.on('exit', () => {
-				this._terminated('target exited');
-			});
-			nodeProcess.on('close', (code) => {
-				this._terminated('target closed');
-			});
-
-			this._captureOutput(nodeProcess);
-		}
-
-		try {
-			this.afterConnection();
-		}
-		catch (e) {
-			this.sendErrorResponse(response, 18, e.message);
-			return;
-		}
-
-		this.sendResponse(response);
-	}
-
-
-	private beforeConnection(env: any) {
-		// make sure to 'Stop' the buffered logging if 'trace' is not set
-		logger.setup(this._commonArgs.trace ? Logger.LogLevel.Verbose : Logger.LogLevel.Stop, false);
-
-		const address = this._commonArgs.address || 'localhost';
-		if (this._commonArgs.mode === 'connect') {
-			// connect to a quickjs runtime that is instructed to listen for a connection.
-			// typically connect should not be used with launching, because it
-			// needs to wait for quickjs to spin up and listen.
-			// connect should be used with attach.
-
-			if (!this._commonArgs.port)
-				throw new Error("Must specify a 'port' for 'connect'");
-			env['QUICKJS_DEBUG_LISTEN_ADDRESS'] = `${address}:${this._commonArgs.port}`;
-		}
-		else {
-			this._server = new Server(socket => {
-				this.closeServer();
-				this.onSocket(socket);
-			});
-			this._server.listen(this._commonArgs.port || 0);
-			let port = (<AddressInfo>this._server.address()).port;
-			this.log(`QuickJS Debug Port: ${port}`);
-
-			env['QUICKJS_DEBUG_ADDRESS'] = `localhost:${port}`;
-		}
-	}
-
-	private async afterConnection() {
-		if (this._commonArgs.mode === 'connect') {
-
-			let socket: Socket | undefined = undefined;
-			for (let attempt = 0; attempt < 10; attempt++) {
-				try {
-					socket = await new Promise<Socket>((resolve, reject) => {
-						let socket = createConnection(this._commonArgs.port, this._commonArgs.address);
-						socket.on('connect', () => {
-							socket.removeAllListeners();
-							resolve(socket);
-						});
-
-						socket.on('close', reject);
-						socket.on('error', reject);
+		logger.setup(true? Logger.LogLevel.Verbose : Logger.LogLevel.Stop, true);
+		for (let attempt = 0; attempt < 10; attempt++) {
+			this.log('CONNECTING TO: ' + 'ox');
+			this.log('CONNECTING TO: ' + 'ox');
+			try {
+				socket = await new Promise<Socket>((resolve, reject) => {
+					let socket = createConnection(8888, "ox");
+					socket.on('connect', () => {
+						this.log('CONNECTED TO: ' + 'ox');
+						socket.removeAllListeners();
+						resolve(socket);
 					});
-					break;
-				}
-				catch (e) {
-					await new Promise(resolve => setTimeout(resolve, 1000));
-				}
-			}
 
-			if (!socket) {
-				const address = this._commonArgs.address || 'localhost';
-				throw new Error(`Cannot launch connect (${address}:${this._commonArgs.port}).`);
+					socket.on('close', reject);
+					socket.on('error', reject);
+				});
+				break;
 			}
-
-			this.onSocket(socket);
+			catch (e) {
+				await new Promise(resolve => setTimeout(resolve, 1000));
+			}
 		}
+
+		if (!socket) {
+			const address = "ox";
+			throw new Error(`Cannot launch connect (${address}:${8888}).`);
+		}
+
+		this.onSocket(socket as any);
+		this.sendResponse(response);
 	}
 
-	private _captureOutput(process: CP.ChildProcess) {
-		process.stdout.on('data', (data: string) => {
-			this.sendEvent(new OutputEvent(data.toString(), 'stdout'));
+	protected async attachRequest(response: DebugProtocol.AttachResponse, args: DebugProtocol.AttachRequestArguments, request?: DebugProtocol.Request) {
+		// make sure to 'Stop' the buffered logging if 'trace' is not set
+
+		this.log(`Attaching debugger to Membrane`);
+		this._commonArgs = { ...args as any };
+		logger.setup(this._commonArgs.trace ? Logger.LogLevel.Verbose : Logger.LogLevel.Stop, false);
+		const apiUrl = getApiBaseUrl();
+
+		const { access_token } = await configFile();
+		const { programs } = await vscode.window.withProgress({
+			location: vscode.ProgressLocation.Notification,
+			title: "Fetching programs...",
+			cancellable: false,
+		}, async (_progress, _token) => {
+			let response;
+			try {
+				response = await fetch(`${apiUrl}/ps`, {
+					method: "GET",
+					headers: {
+						"Content-Type": "application/json",
+						"Authorization": `Bearer ${access_token}`,
+					}
+				});
+			} catch (e) {
+				vscode.window.showErrorMessage("Failed to fetch programs" + e);
+				throw e;
+			}
+			const json = await response.json();
+			return json;
 		});
-		process.stderr.on('data', (data: string) => {
-			this.sendEvent(new OutputEvent(data.toString(), 'stderr'));
+		const program = await vscode.window.showQuickPick(programs.map(p => `${p.name} (${p.pid})`), {
+			placeHolder: "Select a program to debug",
 		});
+		if (!program) {
+			this.sendErrorResponse(response, 2028, `No program selected. Canceling debug session.`);
+			return;
+		}
+		this.log('Attaching debugger to program: ' + program);
+		const matches = program.match(/(\w+) \((\d+)\)/)!;
+		const pname = matches[1];
+		const pid = matches[2];
+		this._commonArgs.pname = pname;
+		this._commonArgs.pid = pid;
+
+
+		// Fetch source_map using the program_details endpoint
+		const { source_map } = await vscode.window.withProgress({
+			location: vscode.ProgressLocation.Notification,
+			title: "Fetching source code...",
+			cancellable: false,
+		}, async (_progress, _token) => {
+			let response;
+			try {
+				response = await fetch(`${apiUrl}/program_details/${pid}?source_map=true`, {
+					method: "GET",
+					headers: {
+						"Content-Type": "application/json",
+						"Authorization": `Bearer ${access_token}`,
+					}
+				});
+			} catch (e) {
+				vscode.window.showErrorMessage("Failed to fetch source code" + e);
+				throw e;
+			}
+			const json = await response.json();
+			return json;
+		});
+		await this.loadSourceMap(source_map);
+
+		// Important that we notify this after loading the source map
+		this._argsSubject.notify();
+
+		// Connect to Membrane's websocket
+		const wsUrl = `${apiUrl.replace(/^http/, 'ws')}/debugger/ws?pid=${this._commonArgs.pname}`;
+		this.log(`Connecting to ${wsUrl}`);
+		const ws = new WebSocket(wsUrl, {
+			headers: {
+				"Authorization": `Bearer ${access_token}`,
+			}
+		});
+		const tunnel = WebSocketStream(ws);
+		this.onSocket(tunnel);
+
+		this.sendResponse(response);
+	}
+
+	getProgramName(): string {
+		return this._commonArgs.pname;
 	}
 
 	async getArguments(): Promise<SourcemapArguments> {
 		await this._argsReady;
 		return this._commonArgs;
-	}
-
-	public async logTrace(message: string) {
-		await this._argsReady;
-		if (this._commonArgs.trace)
-			this.log(message);
 	}
 
 	public log(message: string) {
@@ -451,7 +446,7 @@ export class QuickJSDebugSession extends SourcemapSession {
 			breakpoints: []
 		};
 
-		this.logTrace(`setBreakPointsRequest: ${JSON.stringify(args)}`);
+		this.log(`setBreakPointsRequest: ${JSON.stringify(args)}`);
 
 		if (!args.source.path) {
 			this.sendResponse(response);
@@ -509,12 +504,17 @@ export class QuickJSDebugSession extends SourcemapSession {
 		if (this._threads.size === 0) {
 			await new Promise((resolve, reject) => {
 				this.once('quickjs-thread', () => {
-					resolve();
+					resolve(void 0);
 				});
 			});
 		}
 		response.body = {
-			threads: Array.from(this._threads.keys()).map(thread => new Thread(thread, `thread 0x${thread.toString(16)}`))
+			threads: [
+				...Array.from(this._threads.keys()).map(thread => new Thread(thread, `thread 0x${thread.toString(16)}`)),
+				new Thread(1, 'thread 0x1'),
+				new Thread(2, 'thread 0x2'),
+
+			]
 		};
 		this.sendResponse(response);
 	}
@@ -527,6 +527,7 @@ export class QuickJSDebugSession extends SourcemapSession {
 		for (const { id, name, filename, line, column } of body) {
 			let mappedId = id + thread;
 			this._stackFrames.set(mappedId, thread);
+			this.log(`MAPING ${id} ${name} ${filename} ${line} ${column}: ${mappedId}`);
 
 			try {
 				const mappedLocation = await this.translateRemoteLocationToLocal({
@@ -598,11 +599,11 @@ export class QuickJSDebugSession extends SourcemapSession {
 
 	private sendThreadMessage(envelope: any) {
 		if (!this._connection) {
-			this.logTrace(`debug connection not avaiable`);
+			this.log(`debug connection not avaiable`);
 			return;
 		}
 
-		this.logTrace(`sent: ${JSON.stringify(envelope)}`);
+		this.log(`sent: ${JSON.stringify(envelope)}`);
 
 		let json = JSON.stringify(envelope);
 
@@ -647,8 +648,10 @@ export class QuickJSDebugSession extends SourcemapSession {
 	}
 
 	protected async nextRequest(response: DebugProtocol.NextResponse, args: DebugProtocol.NextArguments) {
+		logger.warn(`NEXT START`);
 		response.body = await this.sendThreadRequest(args.threadId, response, args);
 		this.sendResponse(response);
+		logger.warn(`NEXT END`);
 	}
 
 	protected async stepInRequest(response: DebugProtocol.StepInResponse, args: DebugProtocol.StepInArguments, request?: DebugProtocol.Request) {
@@ -739,4 +742,14 @@ export class QuickJSDebugSession extends SourcemapSession {
 
 		this.sendResponse(response);
 	}
+
+    // protected sourceRequest(response: DebugProtocol.SourceResponse, args: DebugProtocol.SourceArguments, request?: DebugProtocol.Request): void {
+	// 	this.log(`Loading source: ${args.source!.path}`);
+	// 	response.body = {
+	// 		content: ('This is the source for ' + args.source!.path + '\n').repeat(2000),
+	// 		mimeType: 'text/plain'
+	// 	};
+
+	// 	this.sendResponse(response);
+	// }
 }

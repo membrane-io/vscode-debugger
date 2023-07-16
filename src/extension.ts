@@ -19,17 +19,17 @@ const EMBED_DEBUG_ADAPTER = true;
 export function activate(context: vscode.ExtensionContext) {
 	// register a configuration provider for 'quickjs' debug type
 	const provider = new QuickJSConfigurationProvider();
-	context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('quickjs', provider));
+	context.subscriptions.push(vscode.debug.registerDebugConfigurationProvider('membrane', provider));
 
 	if (EMBED_DEBUG_ADAPTER) {
 		// The following use of a DebugAdapter factory shows how to run the debug adapter inside the extension host (and not as a separate process).
 		const factory = new QuickJSDebugAdapterDescriptorFactory();
-		context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory('quickjs', factory));
+		context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory('membrane', factory));
 		context.subscriptions.push(factory);
 	} else {
 		// The following use of a DebugAdapter factory shows how to control what debug adapter executable is used.
 		// Since the code implements the default behavior, it is absolutely not neccessary and we show it here only for educational purpose.
-		context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory('quickjs', {
+		context.subscriptions.push(vscode.debug.registerDebugAdapterDescriptorFactory('membrane', {
 			createDebugAdapterDescriptor: (session: vscode.DebugSession, executable: vscode.DebugAdapterExecutable | undefined) => {
 				// param "executable" contains the executable optionally specified in the package.json (if any)
 
