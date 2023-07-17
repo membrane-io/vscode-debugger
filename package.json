@@ -16,7 +16,7 @@
     "vscode": "^1.70.0",
     "node": "^18.14.0"
   },
-  "icon": "images/quickjs-debug-icon.png",
+  "icon": "debugger-128.png",
   "categories": [
     "Debuggers"
   ],
