@@ -16,7 +16,7 @@
     "vscode": "^1.70.0",
     "node": "^18.14.0"
   },
-  "icon": "debugger-128.png",
+  "icon": "debugger_128.png",
   "categories": [
     "Debuggers"
   ],
