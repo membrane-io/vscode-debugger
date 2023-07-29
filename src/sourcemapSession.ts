@@ -183,7 +183,7 @@ export abstract class SourcemapSession extends LoggingDebugSession {
           )}`
         );
         const folderPath = getProgramPath(this.getProgramName());
-        this.log(`original souRCE + ${smp}`);
+        this.log(`Original source + ${smp}`);
         original.source = path.join(folderPath, path.basename(original.source));
         this.log(
           `translateRemoteLocationToLocal: ${JSON.stringify(
