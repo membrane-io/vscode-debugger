@@ -63,6 +63,13 @@
         "language": "markdown"
       }
     ],
+    "commands": [
+      {
+        "command": "membrane.debugCurrentProgram",
+        "title": "Debug current program",
+        "category": "Membrane"
+      }
+    ],
     "debuggers": [
       {
         "type": "membrane",

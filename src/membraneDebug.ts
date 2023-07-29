@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { Server, Socket, createConnection } from "net";
+import { Server } from "net";
 import { basename } from "path";
 import { MappedPosition } from "source-map";
 import {
@@ -28,6 +28,7 @@ const Transform = require("stream").Transform;
 const { Subject } = require("await-notify");
 
 interface CommonArguments extends SourcemapArguments {
+  program: string;
   pname: string;
   pid: string;
   // args?: string[];
@@ -71,34 +72,6 @@ interface PendingResponse {
 }
 
 type ApiTunnel = WebSocketStream.WebSocketDuplex;
-
-// class ApiTunnel extends Duplex {
-// 	ws: WebSocket;
-// 	buf: String;
-// 	constructor(url: string) {
-// 		super();
-// 		this.ws = new WebSocket(url);
-// 		this.ws.onmessage = (event) => {
-// 			// Append to buf
-// 			this.buf += event.data;
-// 		};
-// 	}
-
-// 	_write(chunk, encoding, callback) {
-// 		console.log('WRITING TO API TUNNEL:', chunk.toString());
-// 		this.ws.send(chunk.toString());
-// 		// TODO: send chunk to API
-// 		callback();
-// 	}
-
-// 	_read(size) {
-// 		console.log('READING FROM API TUNNEL:', size);
-// 		// TODO: read from API
-// 		const data = "";
-// 		this.push("");
-// 	}
-
-// }
 
 export class QuickJSDebugSession extends SourcemapSession {
   private _server?: Server;
@@ -273,46 +246,6 @@ export class QuickJSDebugSession extends SourcemapSession {
     this.sendResponse(response);
   }
 
-  protected async attachRequest2(
-    response: DebugProtocol.AttachResponse,
-    args: DebugProtocol.AttachRequestArguments,
-    request?: DebugProtocol.Request
-  ) {
-    let socket: Socket | undefined = undefined;
-    this._commonArgs = { ...(args as any) };
-    this._argsSubject.notify();
-
-    logger.setup(true ? Logger.LogLevel.Verbose : Logger.LogLevel.Stop, true);
-    for (let attempt = 0; attempt < 10; attempt++) {
-      this.log("CONNECTING TO: " + "ox");
-      this.log("CONNECTING TO: " + "ox");
-      try {
-        socket = await new Promise<Socket>((resolve, reject) => {
-          let socket = createConnection(8888, "ox");
-          socket.on("connect", () => {
-            this.log("CONNECTED TO: " + "ox");
-            socket.removeAllListeners();
-            resolve(socket);
-          });
-
-          socket.on("close", reject);
-          socket.on("error", reject);
-        });
-        break;
-      } catch (e) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-    }
-
-    if (!socket) {
-      const address = "ox";
-      throw new Error(`Cannot launch connect (${address}:${8888}).`);
-    }
-
-    this.onSocket(socket as any);
-    this.sendResponse(response);
-  }
-
   protected async attachRequest(
     response: DebugProtocol.AttachResponse,
     args: DebugProtocol.AttachRequestArguments,
@@ -329,6 +262,7 @@ export class QuickJSDebugSession extends SourcemapSession {
     const apiUrl = getApiBaseUrl();
 
     const { access_token } = await configFile();
+
     const { programs } = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -353,24 +287,35 @@ export class QuickJSDebugSession extends SourcemapSession {
         return json;
       }
     );
-    const program = await vscode.window.showQuickPick(
-      programs.map((p) => `${p.name} (${p.pid})`),
-      {
-        placeHolder: "Select a program to debug",
-      }
-    );
-    if (!program) {
-      this.sendErrorResponse(
-        response,
-        2028,
-        `No program selected. Canceling debug session.`
+
+    let programArg: string | undefined = this._commonArgs.program;
+    let pname: string;
+    let pid: string;
+    if (programArg) {
+      pname = programArg;
+      pid = programs.find((p) => p.name === pname)?.pid;
+    } else {
+      programArg = await vscode.window.showQuickPick(
+        programs.map((p) => `${p.name} (${p.pid})`),
+        {
+          placeHolder: "Select a program to debug",
+        }
       );
-      return;
+
+      if (!programArg) {
+        this.sendErrorResponse(
+          response,
+          2028,
+          `No program selected. Canceling debug session.`
+        );
+        return;
+      }
+      const matches = programArg.match(/^(.+) \((\d+)\)/)!;
+      pname = matches[1];
+      pid = matches[2];
     }
-    this.log("Attaching debugger to program: " + program);
-    const matches = program.match(/^(.+) \((\d+)\)/)!;
-    const pname = matches[1];
-    const pid = matches[2];
+    this.log(`Attaching debugger to: ${pname} (${pid})`);
+
     this._commonArgs.pname = pname;
     this._commonArgs.pid = pid;
 
@@ -590,10 +535,6 @@ export class QuickJSDebugSession extends SourcemapSession {
     for (const { id, name, filename, line, column } of body) {
       let mappedId = id + thread;
       this._stackFrames.set(mappedId, thread);
-      this.log(
-        `MAPING ${id} ${name} ${filename} ${line} ${column}: ${mappedId}`
-      );
-
       try {
         const mappedLocation = await this.translateRemoteLocationToLocal({
           source: filename,

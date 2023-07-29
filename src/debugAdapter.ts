@@ -2,6 +2,6 @@
  * Copyright (C) Microsoft Corporation. All rights reserved.
  *--------------------------------------------------------*/
 
- import { QuickJSDebugSession } from './quickjsDebug';
+import { QuickJSDebugSession } from "./membraneDebug";
 
- QuickJSDebugSession.run(QuickJSDebugSession);
+QuickJSDebugSession.run(QuickJSDebugSession);

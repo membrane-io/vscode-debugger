@@ -40,8 +40,6 @@ export abstract class SourcemapSession extends LoggingDebugSession {
   }
 
   async translateFileToRemote(file: string): Promise<string> {
-    this.log("JUAN translateFileToRemote: " + file);
-
     const sm = this._fileToSourceMap.get(file);
     if (!sm) return file;
     return sm.file;
@@ -51,19 +49,19 @@ export abstract class SourcemapSession extends LoggingDebugSession {
     remoteFile: string,
     remoteRoot?: string
   ): Promise<string> {
-    this.log("JUAN getRemoteAbsolutePath: " + remoteFile);
+    // Everything is bundled in this file
     return "index.js";
-    const commonArgs = await this.getArguments();
-    if (remoteRoot === null) remoteRoot = commonArgs.remoteRoot;
-    if (remoteRoot) remoteFile = path.join(remoteRoot, remoteFile);
-    return remoteFile;
+    // const commonArgs = await this.getArguments();
+    // if (remoteRoot === null) remoteRoot = commonArgs.remoteRoot;
+    // if (remoteRoot) remoteFile = path.join(remoteRoot, remoteFile);
+    // return remoteFile;
   }
 
   private async getRemoteRelativePath(
     remoteFile: string,
     remoteRoot?: string
   ): Promise<string> {
-    this.log("JUAN getRemoteRelativePath " + remoteFile);
+    // TODO: support files other than index.ts?
     return remoteFile;
     const commonArgs = await this.getArguments();
     if (remoteRoot === null) remoteRoot = commonArgs.remoteRoot;
@@ -72,7 +70,6 @@ export abstract class SourcemapSession extends LoggingDebugSession {
   }
 
   private async getLocalAbsolutePath(localFile: string): Promise<string> {
-    this.log("JUAN getLocalAbsolutePath " + localFile);
     const commonArgs = await this.getArguments();
     if (commonArgs.localRoot) return path.join(commonArgs.localRoot, localFile);
     return localFile;
@@ -90,16 +87,12 @@ export abstract class SourcemapSession extends LoggingDebugSession {
     // const commonArgs = await this.getArguments();
     // if (commonArgs.localRoot)
     // 	return path.relative(commonArgs.localRoot, localFile);
-    this.log("JUAN getLocalRelativePath " + localFile);
     return localFile;
   }
 
   async translateFileLocationToRemote(
     sourceLocation: MappedPosition
   ): Promise<MappedPosition[]> {
-    this.log(
-      "JUAN translateFileLocationToRemote " + JSON.stringify(sourceLocation)
-    );
     const commonArgs = await this.getArguments();
     if (!this.isProgramFile(sourceLocation.source)) {
       return [];
@@ -159,9 +152,6 @@ export abstract class SourcemapSession extends LoggingDebugSession {
   async translateRemoteLocationToLocal(
     sourceLocation: MappedPosition
   ): Promise<MappedPosition> {
-    this.log(
-      "JUAN translateRemoteLocationToLocal " + JSON.stringify(sourceLocation)
-    );
     const commonArgs = await this.getArguments();
 
     try {
@@ -177,10 +167,10 @@ export abstract class SourcemapSession extends LoggingDebugSession {
 
         // TODO: source map has no file property. Fix in mctl?
         if (relativeFile !== smp) {
-          this.log("NO MATCH " + relativeFile + " " + smp);
+          this.log("No match " + relativeFile + " " + smp);
           continue;
         } else {
-          this.log("MATCH " + relativeFile + " " + smp);
+          this.log("match " + relativeFile + " " + smp);
         }
 
         const original = sm.originalPositionFor({
@@ -188,12 +178,12 @@ export abstract class SourcemapSession extends LoggingDebugSession {
           line: sourceLocation.line,
         });
         this.log(
-          `ORIGINAL POS FOR ${JSON.stringify(sourceLocation)}: ${JSON.stringify(
+          `original pos for ${JSON.stringify(sourceLocation)}: ${JSON.stringify(
             original
           )}`
         );
         const folderPath = getProgramPath(this.getProgramName());
-        this.log(`ORIGINAL SOURCE + ${smp}`);
+        this.log(`original souRCE + ${smp}`);
         original.source = path.join(folderPath, path.basename(original.source));
         this.log(
           `translateRemoteLocationToLocal: ${JSON.stringify(
@@ -216,7 +206,7 @@ export abstract class SourcemapSession extends LoggingDebugSession {
       }
       throw new Error(`No sourcemap found for ${sourceLocation.source}`);
     } catch (e) {
-      this.log(`FAILED TO TRANSLATE TO LOCAL: ${e}`);
+      this.log(`Failed to translate remote to local: ${e}`);
       // remote files need to be resolved to local files.
       let ret = Object.assign({}, sourceLocation);
       ret.source = await this.getLocalAbsolutePath(
