@@ -5,7 +5,9 @@ This is a Visual Studio Code extension that provides debugger support for [membr
 
 ## Usage
 
-Once this extension is installed, add this to `membrane.code-workspace`:
+[Install from VSCode Marketplace](https://marketplace.visualstudio.com/items?itemName=membrane.membrane-debugger)
+
+Once installed, add this to `membrane.code-workspace`:
 
 ```
   "launch": {
