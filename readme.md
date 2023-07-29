@@ -18,3 +18,8 @@ Once this extension is installed, add this to `membrane.code-workspace`:
   },
 ```
 
+## Acknowledgements
+
+This debugger extension is based on the amazing work by @koush:
+
+ - https://github.com/koush/vscode-quickjs-debug
