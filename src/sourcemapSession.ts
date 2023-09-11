@@ -62,7 +62,7 @@ export abstract class SourcemapSession extends LoggingDebugSession {
     remoteRoot?: string
   ): Promise<string> {
     // TODO: support files other than index.ts?
-    return remoteFile;
+    return "index.js";
     const commonArgs = await this.getArguments();
     if (remoteRoot === null) remoteRoot = commonArgs.remoteRoot;
     if (remoteRoot) return path.relative(remoteRoot, remoteFile);
