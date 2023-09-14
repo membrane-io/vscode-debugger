@@ -30,7 +30,7 @@
   },
   "scripts": {
     "prepublish": "tsc -p ./src",
-    "compile": "tsc -p ./src",
+    "build": "tsc -p ./src",
     "tslint": "tslint ./src/**/*.ts",
     "watch": "tsc -w --skipLibCheck -p ./src",
     "package": "vsce package --yarn",
